@@ -76,14 +76,14 @@ __device__ __forceinline__ uint32_t pack_pair_to_u32<__nv_bfloat16>(float v1, fl
     } \
 }
 
-// --- 新增：配置结构体 ---
+// --- 配置结构体 ---
 struct AppConfig {
     int blocksize = 64;
     std::string compute_type = "fp16";
     std::string target_gpu = "T4";
 };
 
-// --- 新增：配置解析函数 ---
+// --- 配置解析函数 ---
 AppConfig load_config(const std::string& filename) {
     AppConfig config;
     std::ifstream f(filename);
@@ -134,7 +134,7 @@ __global__ void nf4_decode_kernel(
 
     // 瞬间同步：获取当前还活着的线程掩码，只在活着的线程间广播
     unsigned active_mask = __activemask();
-    int lane = threadIdx.x & 31;
+    int lane = threadIdx.x & 31;    // 当前线程在 Warp 内的 ID (0-31)
 
     // 2. 核心优化一：多级存储拓扑优化 (Shared Memory)
     // 缓存 NF4 查找表 (16 * 4 = 64 Bytes)
@@ -232,19 +232,19 @@ int main() {
     ifs.read((char*)h_absmax2.data(), num_groups * 2);
     ifs.read((char*)&offset, 4);
 
-    // --- 关键改进：配置校验 ---
+    // --- 配置校验 ---
     if (cfg.blocksize != blocksize) {
         printf("[Warning] Binary header blocksize (%d) differs from config.txt (%d). "
                "Using Binary Header.\n", blocksize, cfg.blocksize);
     }
 
-    // --- 关键改进：根据 GPU 类型动态调整 Launch 参数 ---
+    // --- 根据 GPU 类型动态调整 Launch 参数 ---
     int threads_per_block = 256; // 默认值
     if (cfg.target_gpu == "T4") {
         // T4 (Turing) 架构 SM 较小，有时 128 线程能获得更好的利用率
         threads_per_block = 128;
     } else {
-        // 针对你的 4060 (Ada) 或 A100 等现代显卡，256 是甜点值
+        // 针对 4060 或 A100 等现代显卡，256 是甜点值
         threads_per_block = 256;
     }
 
@@ -263,17 +263,15 @@ int main() {
     CHECK_CUDA(cudaMemcpy(d_code2, h_code2.data(), 256 * 2, cudaMemcpyHostToDevice));
     CHECK_CUDA(cudaMemcpy(d_absmax2, h_absmax2.data(), num_groups * 2, cudaMemcpyHostToDevice));
 
-// ... 前面的 1.读取数据 和 2.GPU内存分配 保持不变 ...
 // 注意：d_output 依然分配 total_elements * 2 的空间，因为 fp16 和 bf16 都是 2 bytes
 
 // ================== 核心调度与计时区域 (V5 终极版) ==================
 
-    // 【简历优化点：Template 特化分发，实现零分支指令流】
     // 在 Host 端根据配置选择不同的模板实例，Kernel 内部没有任何 if-else
     bool is_bf16 = (cfg.compute_type == "bf16");
     std::cout << "[Dispatch] Launching V5 Kernel with " << (is_bf16 ? "BF16" : "FP16") << " precision path...\n";
 
-    // 【简历优化点：实施线程驻留策略 (Persistent Threads)】
+    // 实施线程驻留策略 (Persistent Threads)
     int sm_count = 0;
     CHECK_CUDA(cudaDeviceGetAttribute(&sm_count, cudaDevAttrMultiProcessorCount, 0));
     
@@ -391,8 +389,6 @@ int main() {
     std::cout << "Realistic BW:         " << bw_real << " GB/s\n";
     
     //std::cout << "Bandwidth: " << bandwidth << " GB/s" << std::endl;
-
-// ... 后续的清理代码保持不变 ...
 
     // 清理
     cudaEventDestroy(start);
