@@ -51,11 +51,23 @@ AppConfig load_config(const std::string& filename) {
 }
 
 // NF4 查找表：放入 __constant__ 内存
-__constant__ float d_NF4_TABLE[16] = {
-    -1.0f, -0.69487101f, -0.51209301f, -0.37391701f,
-    -0.25611401f, -0.14725500f, -0.04162400f, 0.06282201f,
-    0.16859101f, 0.28551400f, 0.40619302f, 0.53675699f,
-    0.68502200f, 0.87091398f, 1.0f, 0.0f
+__constant__ float NF4_TABLE[16] = {
+    -1.0f,                 // 0b0000
+    -0.6961928009986877f,  // 0b0001
+    -0.5250730514526367f,  // 0b0010
+    -0.39491748809814453f, // 0b0011
+    -0.28444138169288635f, // 0b0100
+    -0.18477343022823334f, // 0b0101
+    -0.09105003625154495f, // 0b0110
+    0.0f,                  // 0b0111
+    0.07958029955625534f,  // 0b1000
+    0.16093020141124725f,  // 0b1001
+    0.24611230194568634f,  // 0b1010
+    0.33791524171829224f,  // 0b1011
+    0.44070982933044434f,  // 0b1100
+    0.5626170039176941f,   // 0b1101
+    0.7229568362236023f,   // 0b1110
+    1.0f                   // 0b1111
 };
 
 // V3 Kernel: Shared Memory + 向量化访存
@@ -96,8 +108,8 @@ __global__ void dequantize_nf4_kernel_v3(
     float scale = s1 * s2;
 
     // 5. 计算并向量化写入
-    half res0 = __float2half(d_NF4_TABLE[byte & 0x0F] * scale);
-    half res1 = __float2half(d_NF4_TABLE[byte >> 4] * scale);
+    half res0 = __float2half(NF4_TABLE[byte & 0x0F] * scale);
+    half res1 = __float2half(NF4_TABLE[byte >> 4] * scale);
 
     // 5. 边界保护与写入
     if (byte_idx * 2 + 1 < total_elements) {
