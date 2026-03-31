@@ -154,7 +154,7 @@ __global__ void nf4_decode_kernel(
     uint32_t* out_u32 = reinterpret_cast<uint32_t*>(output);
     int bytes_per_block = blocksize / 2;
 
-    // 3. 核心优化二：驻留线程大循环 (Persistent Threads)
+    // 3. 核心优化二：驻留线程大循环
     for (int64_t byte_idx = tid; byte_idx < full_pair_bytes; byte_idx += stride) {
         
         int block_id = static_cast<int>(byte_idx / bytes_per_block);

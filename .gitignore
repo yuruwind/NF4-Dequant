@@ -1,3 +1,4 @@
 *.bin
 *.ncu-rep
 /v5
+.vscode/
