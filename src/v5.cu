@@ -132,14 +132,11 @@ __global__ void nf4_decode_kernel(
     // Warp Shuffle 掩码与线程 Lane ID
     //unsigned warp_mask = 0xffffffffu;
 
-    // 瞬间同步：获取当前还活着的线程掩码，只在活着的线程间广播
     unsigned active_mask = __activemask();
-    int lane = threadIdx.x & 31;    // 当前线程在 Warp 内的 ID (0-31)
+    int lane = threadIdx.x & 31;    // Warp 内的 ID
 
     // 2. 核心优化一：多级存储拓扑优化 (Shared Memory)
-    // 缓存 NF4 查找表 (16 * 4 = 64 Bytes)
     __shared__ float s_LUT[16];
-    // 缓存 一级码表 code2 (256 * 2 = 512 Bytes)，极大降低 L2 Cache 压力
     __shared__ half s_code2[256]; 
 
     if (threadIdx.x < 16) {
@@ -162,39 +159,35 @@ __global__ void nf4_decode_kernel(
         float real_absmax = 0.0f;
 
         // 4. 核心优化三：Warp Shuffle 元数据广播
-        // 在 blocksize >= 64 时，1个 Warp (32线程) 刚好处理 32字节 (1个 block)
-        // 故整个 Warp 内的 block_id 是一致的，只需让 lane 0 计算缩放因子即可！
+        // lane 0 计算缩放因子
         if (lane == 0) {
             uint8_t qa = absmax_q[block_id];
-            // 从 Shared Memory 读取 s_code2，彻底消灭对这 512 字节的全局访存
             real_absmax = (__half2float(absmax2[group_id]) * __half2float(s_code2[qa])) + offset;
         }
-        // 瞬间同步：将 lane 0 算好的结果塞入其他 31 个线程的寄存器
-        //real_absmax = __shfl_sync(warp_mask, real_absmax, 0);
+        // 同步
         real_absmax = __shfl_sync(active_mask, real_absmax, 0);
 
-        // 5. 标量读取与位运算解包 (修复高低位映射)
+        // 5. 标量读取与位运算解包 
         uint8_t packed = packed_weights[byte_idx];
-        float v1 = s_LUT[packed >> 4] * real_absmax;   // 高位在前
-        float v2 = s_LUT[packed & 0x0F] * real_absmax; // 低位在后
+        float v1 = s_LUT[packed >> 4] * real_absmax;
+        float v2 = s_LUT[packed & 0x0F] * real_absmax;
 
-        // 6. 核心优化四：向量化存取与硬件原语
+        // 6. 核心优化四：向量化存取
         // 调用外部的 pack_pair_to_u32 模板，将两个 Float 强行压缩为 32-bit 的结构体 (half2/bfloat162)
-        // 并通过 out_u32 执行 32-bit 的 STG.E.32 合并写入，完美利用显存带宽
         out_u32[byte_idx] = pack_pair_to_u32<OutT>(v1, v2);
     }
 
-    // 7. 边界安全处理：处理奇数维度的最后“半个”字节 (标量降级写入)
+    // 7. 边界安全处理:奇数尾部处理
     if ((num_elements & 1) != 0) {
         int64_t tail_byte = total_bytes - 1;
-        // 只需 1 个线程收尾
+ 
         if (tid == 0) {
             uint8_t packed = packed_weights[tail_byte];
             int block_id = static_cast<int>(tail_byte / bytes_per_block);
             int group_id = block_id / group_size;
             float real_absmax = (__half2float(absmax2[group_id]) * __half2float(code2[absmax_q[block_id]])) + offset;
             
-            // 奇数情况下，多出来的那个权重存在【低 4 位】中
+            // 奇数情况下，多出来的那个权重存在低 4 位中
             output[num_elements - 1] = float_to_out<OutT>(s_LUT[packed & 0x0F] * real_absmax);
         }
     }
@@ -263,15 +256,13 @@ int main() {
     CHECK_CUDA(cudaMemcpy(d_code2, h_code2.data(), 256 * 2, cudaMemcpyHostToDevice));
     CHECK_CUDA(cudaMemcpy(d_absmax2, h_absmax2.data(), num_groups * 2, cudaMemcpyHostToDevice));
 
-// 注意：d_output 依然分配 total_elements * 2 的空间，因为 fp16 和 bf16 都是 2 bytes
 
-// ================== 核心调度与计时区域 (V5 终极版) ==================
+// ================== 核心调度与计时区域 ==================
 
     // 在 Host 端根据配置选择不同的模板实例，Kernel 内部没有任何 if-else
     bool is_bf16 = (cfg.compute_type == "bf16");
     std::cout << "[Dispatch] Launching V5 Kernel with " << (is_bf16 ? "BF16" : "FP16") << " precision path...\n";
 
-    // 实施线程驻留策略 (Persistent Threads)
     int sm_count = 0;
     CHECK_CUDA(cudaDeviceGetAttribute(&sm_count, cudaDevAttrMultiProcessorCount, 0));
     
@@ -285,10 +276,10 @@ int main() {
             &max_active_blocks, nf4_decode_kernel<half>, threads_per_block, 0));
     }
 
-    // 2. 精准计算 Grid 大小：正好塞满整个显卡的 SM 单元，不留空隙，也不多派
+    // 2. 精准计算 Grid 大小
     int grid_x = sm_count * max_active_blocks;
     
-    // 3. 安全防护：如果数据量极小（比如几百个字节），连整个 GPU 都喂不饱，就降级为常规大小
+    // 3. 安全防护：如果数据量极小，就降级为常规大小
     int64_t total_bytes = (total_elements + 1) / 2;
     int64_t max_grid = (total_bytes + threads_per_block - 1) / threads_per_block;
     if (grid_x > max_grid) {
@@ -318,7 +309,7 @@ int main() {
     CHECK_CUDA(cudaDeviceSynchronize());
 
     // --- 正式计时 (跑 100 次取平均以过滤抖动) ---
-    const int iters = 100; // 建议提速后增加迭代次数
+    const int iters = 100;
     CHECK_CUDA(cudaEventRecord(start));
     for(int i = 0; i < iters; ++i) { 
         if (is_bf16) {
@@ -339,8 +330,7 @@ int main() {
     ms /= iters; 
 // ==================================================
 
-// 5. 验证结果 (动态适配验证逻辑)
-    // 无论输出什么，先拷回 CPU
+// 5. 验证结果 
     std::vector<uint16_t> h_output_raw(total_elements); // 用 uint16_t 统一接收 2bytes 数据
     CHECK_CUDA(cudaMemcpy(h_output_raw.data(), d_output, total_elements * 2, cudaMemcpyDeviceToHost));
 
@@ -353,7 +343,7 @@ int main() {
     for(int i = 0; i < total_elements; ++i) {
         float out_f = 0.0f;
         if (is_bf16) {
-            // BF16 转 Float 逻辑 (或者链接你自带的 CPU 转换库)
+            // BF16 转 Float
             __nv_bfloat16 bf16_val = *reinterpret_cast<__nv_bfloat16*>(&h_output_raw[i]);
             out_f = __bfloat162float(bf16_val);
         } else {
@@ -374,21 +364,19 @@ int main() {
     std::cout << "MAE:       " << mae << std::endl;
     std::cout << "Time:      " << ms << " ms" << std::endl;
     
-    // --- Effective (旧的) ---
+    // --- Effective ---
     double bytes_read_theory = (total_elements * 0.5) + num_blocks + (num_groups * 2.0);
     double bytes_write = total_elements * 2.0;
     double total_theory = bytes_read_theory + bytes_write;
 
     double bw_theory = total_theory / (ms / 1000.0) / 1e9;
 
-    // --- Realistic (新的) ---
+    // --- Realistic ---
     double total_real = total_elements * (0.5 + 2.0);
     double bw_real = total_real / (ms / 1000.0) / 1e9;
 
     std::cout << "Effective BW (theory): " << bw_theory << " GB/s\n";
     std::cout << "Realistic BW:         " << bw_real << " GB/s\n";
-    
-    //std::cout << "Bandwidth: " << bandwidth << " GB/s" << std::endl;
 
     // 清理
     cudaEventDestroy(start);

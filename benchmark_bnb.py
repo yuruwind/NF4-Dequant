@@ -51,14 +51,14 @@ def benchmark_bitsandbytes(rows, cols, blocksize=64, iters=200):
     # 4. 带宽计算（两种）
     # ======================
 
-    # ❌ 原始（理论 IO，容易虚高）
+    # 原始（理论 IO，容易虚高）
     bytes_read_theory = (total_elements * 0.5) + num_blocks + (num_groups * 2.0)
     bytes_write = total_elements * 2.0
     total_theory = bytes_read_theory + bytes_write
 
     bw_theory = total_theory / (time_ms / 1000.0) / 1e9
 
-    # ✅ 更真实（只统计必走 DRAM 的）
+    # 更真实（只统计必走 DRAM 的）
     # packed weights + output
     total_real = total_elements * (0.5 + 2.0)
 
@@ -68,7 +68,7 @@ def benchmark_bitsandbytes(rows, cols, blocksize=64, iters=200):
     # 5. 输出
     # ======================
     print("\n" + "="*50)
-    print("🚀 bitsandbytes Benchmark（修正版）")
+    print("🚀 bitsandbytes Benchmark")
     print("="*50)
     print(f"矩阵规模: {rows}x{cols}")
     print(f"Kernel 耗时: {time_ms:.5f} ms")
